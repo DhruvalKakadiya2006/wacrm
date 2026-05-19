@@ -212,8 +212,13 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
           .eq('phone_number_id', phoneNumberId)
           .single()
 
+        console.log('Config lookup result:')
+        console.log('Config:', config)
+        console.log('Error:', configError)
+
         if (configError || !config) {
-          console.error('No config found for phone_number_id:', phoneNumberId, configError)
+          console.error('NO CONFIG FOUND for phone_number_id:', phoneNumberId)
+          console.error('Config error details:', JSON.stringify(configError, null, 2))
           continue
         }
 
