@@ -143,6 +143,8 @@ export async function GET(request: Request) {
 
 // POST - Receive messages
 export async function POST(request: Request) {
+  console.log('=== WEBHOOK START ===')
+  
   // Read raw body first so we can HMAC-verify the exact bytes Meta
   // signed. request.json() would re-encode and break the signature.
   const rawBody = await request.text()
@@ -159,6 +161,10 @@ export async function POST(request: Request) {
   let body: { entry?: WhatsAppWebhookEntry[] }
   try {
     body = JSON.parse(rawBody)
+    console.log('Payload:', JSON.stringify(body?.entry?.[0]?.changes?.[0]?.value, null, 2))
+    console.log('Phone ID:', body?.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id)
+    console.log('Messages:', body?.entry?.[0]?.changes?.[0]?.value?.messages)
+    console.log('Statuses:', body?.entry?.[0]?.changes?.[0]?.value?.statuses)
   } catch {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
   }
@@ -172,50 +178,68 @@ export async function POST(request: Request) {
 }
 
 async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
-  if (!body.entry) return
+  try {
+    if (!body.entry) {
+      console.log('No entries in webhook body')
+      return
+    }
 
-  for (const entry of body.entry) {
-    for (const change of entry.changes) {
-      const value = change.value
+    for (const entry of body.entry) {
+      for (const change of entry.changes) {
+        const value = change.value
 
-      // Handle status updates
-      if (value.statuses) {
-        for (const status of value.statuses) {
-          await handleStatusUpdate(status)
+        // Handle status updates
+        if (value.statuses) {
+          console.log('Processing status updates:', value.statuses.length)
+          for (const status of value.statuses) {
+            await handleStatusUpdate(status)
+          }
+        }
+
+        // Handle incoming messages
+        if (!value.messages || !value.contacts) {
+          console.log('No messages or contacts in this change')
+          continue
+        }
+
+        const phoneNumberId = value.metadata.phone_number_id
+        console.log('Looking up whatsapp config for phone_number_id:', phoneNumberId)
+
+        // Find user's config by phone_number_id
+        const { data: config, error: configError } = await supabaseAdmin()
+          .from('whatsapp_config')
+          .select('*')
+          .eq('phone_number_id', phoneNumberId)
+          .single()
+
+        if (configError || !config) {
+          console.error('No config found for phone_number_id:', phoneNumberId, configError)
+          continue
+        }
+
+        console.log('Config found:', { phone_number_id: config.phone_number_id, user_id: config.user_id })
+
+        const decryptedAccessToken = decrypt(config.access_token)
+        console.log('Access token decrypted successfully')
+
+        for (let i = 0; i < value.messages.length; i++) {
+          const message = value.messages[i]
+          const contact = value.contacts[i] || value.contacts[0]
+
+          console.log('Processing message:', { id: message.id, type: message.type, from: message.from })
+
+          await processMessage(
+            message,
+            contact,
+            config.user_id,
+            decryptedAccessToken
+          )
         }
       }
-
-      // Handle incoming messages
-      if (!value.messages || !value.contacts) continue
-
-      const phoneNumberId = value.metadata.phone_number_id
-
-      // Find user's config by phone_number_id
-      const { data: config, error: configError } = await supabaseAdmin()
-        .from('whatsapp_config')
-        .select('*')
-        .eq('phone_number_id', phoneNumberId)
-        .single()
-
-      if (configError || !config) {
-        console.error('No config found for phone_number_id:', phoneNumberId)
-        continue
-      }
-
-      const decryptedAccessToken = decrypt(config.access_token)
-
-      for (let i = 0; i < value.messages.length; i++) {
-        const message = value.messages[i]
-        const contact = value.contacts[i] || value.contacts[0]
-
-        await processMessage(
-          message,
-          contact,
-          config.user_id,
-          decryptedAccessToken
-        )
-      }
     }
+  } catch (e) {
+    console.error('WEBHOOK ERROR:', e)
+    throw e
   }
 }
 
@@ -360,27 +384,39 @@ async function processMessage(
   const senderPhone = normalizePhone(message.from)
   const contactName = contact.profile.name
 
+  console.log('Parsing message content...')
   // Parse message content based on type
   const { contentText, mediaUrl, mediaType } = await parseMessageContent(
     message,
     accessToken
   )
+  console.log('Message content parsed:', { contentText, mediaUrl, mediaType })
 
+  console.log('Finding or creating contact...')
   // Find or create contact
   const contactOutcome = await findOrCreateContact(
     userId,
     senderPhone,
     contactName
   )
-  if (!contactOutcome) return
+  if (!contactOutcome) {
+    console.error('Failed to find or create contact')
+    return
+  }
   const contactRecord = contactOutcome.contact
+  console.log('Contact:', { id: contactRecord.id, name: contactRecord.name, wasCreated: contactOutcome.wasCreated })
 
+  console.log('Finding or creating conversation...')
   // Find or create conversation
   const conversation = await findOrCreateConversation(
     userId,
     contactRecord.id
   )
-  if (!conversation) return
+  if (!conversation) {
+    console.error('Failed to find or create conversation')
+    return
+  }
+  console.log('Conversation:', { id: conversation.id })
 
   // Insert message — field names MUST match the messages table schema
   // (see supabase/migrations/001_initial_schema.sql):
@@ -415,6 +451,7 @@ async function processMessage(
     .eq('sender_type', 'customer')
   const isFirstInboundMessage = (priorCustomerMsgCount ?? 0) === 0
 
+  console.log('Creating message...')
   const { error: msgError } = await supabaseAdmin().from('messages').insert({
     conversation_id: conversation.id,
     sender_type: 'customer',
@@ -430,7 +467,9 @@ async function processMessage(
     console.error('Error inserting message:', msgError)
     return
   }
+  console.log('Message created successfully')
 
+  console.log('Updating conversation...')
   // Update conversation
   const { error: convError } = await supabaseAdmin()
     .from('conversations')
@@ -444,6 +483,8 @@ async function processMessage(
 
   if (convError) {
     console.error('Error updating conversation:', convError)
+  } else {
+    console.log('Conversation updated successfully')
   }
 
   // If this contact was a recent broadcast recipient, flag the reply
