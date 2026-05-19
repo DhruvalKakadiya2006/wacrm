@@ -205,12 +205,23 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
         const phoneNumberId = value.metadata.phone_number_id
         console.log('Looking up whatsapp config for phone_number_id:', phoneNumberId)
 
+        // Check Supabase env vars
+        console.log('Supabase URL exists:', !!process.env.NEXT_PUBLIC_SUPABASE_URL)
+        console.log('Supabase service role key exists:', !!process.env.SUPABASE_SERVICE_ROLE_KEY)
+        
+        console.log('Initializing Supabase admin client...')
+        const adminClient = supabaseAdmin()
+        console.log('Admin client initialized')
+
+        console.log('Executing query...')
         // Find user's config by phone_number_id
-        const { data: config, error: configError } = await supabaseAdmin()
+        const { data: config, error: configError } = await adminClient
           .from('whatsapp_config')
           .select('*')
           .eq('phone_number_id', phoneNumberId)
           .single()
+        
+        console.log('Query completed')
 
         console.log('Config lookup result:')
         console.log('Config:', config)
